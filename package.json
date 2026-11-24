@@ -1,0 +1,16 @@
+{
+  "name": "quadric_mesh_simplify",
+  "version": "1.0.0",
+  "description": "Quadric error metric mesh simplification in zero dependency JavaScript, with manifold and flip guards, Hausdorff measurement, OBJ I/O, CLI and a browser demo.",
+  "type": "module",
+  "main": "src/index.js",
+  "exports": "./src/index.js",
+  "bin": { "qem": "bin/qem.js" },
+  "scripts": {
+    "test": "node --test",
+    "demo": "python3 -m http.server 8000"
+  },
+  "engines": { "node": ">=18" },
+  "keywords": ["mesh", "simplification", "decimation", "quadric", "qem", "geometry", "obj", "3d"],
+  "license": "MIT"
+}
