@@ -1,0 +1,181 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>QEM simplification demo</title>
+<style>
+  :root { --bg: #0f1115; --panel: #181b22; --text: #e6e8ee; --muted: #8b93a7; --accent: #6aa7ff; }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.4 system-ui, sans-serif; }
+  main { display: grid; grid-template-columns: 300px 1fr; height: 100vh; }
+  aside { background: var(--panel); padding: 18px; overflow: auto; }
+  h1 { font-size: 17px; margin: 0 0 4px; }
+  p.lead { color: var(--muted); margin: 0 0 16px; }
+  label { display: block; margin: 14px 0 6px; color: var(--muted); }
+  select, input[type=range], input[type=file] { width: 100%; }
+  .row { display: flex; gap: 12px; align-items: center; margin-top: 10px; }
+  table { width: 100%; border-collapse: collapse; margin-top: 16px; font-variant-numeric: tabular-nums; }
+  td { padding: 3px 0; border-bottom: 1px solid #262a33; }
+  td:last-child { text-align: right; }
+  canvas { width: 100%; height: 100%; display: block; cursor: grab; }
+  .hint { color: var(--muted); font-size: 12px; margin-top: 16px; }
+  @media (max-width: 760px) { main { grid-template-columns: 1fr; grid-template-rows: auto 60vh; height: auto; } }
+</style>
+</head>
+<body>
+<main>
+  <aside>
+    <h1>Quadric mesh simplification</h1>
+    <p class="lead">Garland and Heckbert edge collapse with manifold and flip guards, running live in your browser.</p>
+
+    <label for="model">Model</label>
+    <select id="model">
+      <option value="asteroid">Asteroid (20,480 faces)</option>
+      <option value="torus">Torus (9,216 faces)</option>
+      <option value="terrain">Terrain with open border (8,192 faces)</option>
+      <option value="sphere">Icosphere (5,120 faces)</option>
+    </select>
+    <label for="file">or load an OBJ file</label>
+    <input id="file" type="file" accept=".obj">
+
+    <label for="ratio">Keep <span id="ratioOut">10</span>% of faces</label>
+    <input id="ratio" type="range" min="0.2" max="100" step="0.1" value="10">
+
+    <label for="metric">Collapse cost</label>
+    <select id="metric">
+      <option value="qem">Quadric error (QEM)</option>
+      <option value="edge-length">Shortest edge, midpoint (baseline)</option>
+    </select>
+
+    <div class="row"><input id="wire" type="checkbox" checked><label for="wire" style="margin:0">Wireframe</label></div>
+    <div class="row"><input id="lock" type="checkbox"><label for="lock" style="margin:0">Lock open borders</label></div>
+
+    <table id="stats"></table>
+    <p class="hint">Drag to rotate, scroll to zoom. Hausdorff distance is sampled and shown as a percentage of the bounding box diagonal.</p>
+  </aside>
+  <canvas id="view"></canvas>
+</main>
+<script type="module">
+import { simplify, analyze, parseOBJ, weld, asteroid, torus, grid, icosphere, surfaceDeviation, boundingBox } from '../src/index.js';
+
+const $ = (id) => document.getElementById(id);
+const canvas = $('view');
+const ctx = canvas.getContext('2d');
+let source, current, yaw = 0.6, pitch = -0.45, zoom = 1;
+
+const builtins = {
+  asteroid: () => asteroid(5),
+  torus: () => torus(96, 48),
+  terrain: () => grid(64, (x, y) => 0.15 * Math.sin(7 * x) * Math.cos(5 * y) + 0.05 * Math.sin(23 * x * y)),
+  sphere: () => icosphere(4),
+};
+
+function normalise(mesh) {
+  const bb = boundingBox(mesh.positions);
+  const c = [0, 1, 2].map((k) => (bb.min[k] + bb.max[k]) / 2);
+  const s = 2 / bb.diagonal;
+  return { positions: mesh.positions.map((p) => p.map((x, k) => (x - c[k]) * s)), faces: mesh.faces };
+}
+
+function setSource(mesh) {
+  source = normalise(mesh);
+  run();
+}
+
+let pending = 0;
+function run() {
+  const id = ++pending;
+  requestAnimationFrame(() => {
+    if (id !== pending) return;
+    const ratio = Number($('ratio').value) / 100;
+    $('ratioOut').textContent = Number($('ratio').value).toFixed(1);
+    const { mesh, stats } = simplify(source, { targetRatio: ratio, metric: $('metric').value, lockBoundary: $('lock').checked });
+    current = mesh;
+    const a = analyze(mesh);
+    const big = source.faces.length > 25000;
+    const dev = big ? null : surfaceDeviation(source, mesh, 1);
+    const rows = [
+      ['Faces', `${mesh.faces.length.toLocaleString()} / ${source.faces.length.toLocaleString()}`],
+      ['Vertices', mesh.positions.length.toLocaleString()],
+      ['Euler characteristic', a.euler],
+      ['Manifold', a.valid ? 'yes' : 'no'],
+      ['Collapses', stats.collapses.toLocaleString()],
+      ['Rejected (flip/link)', `${stats.rejected.flip} / ${stats.rejected.link + stats.rejected.boundary}`],
+      ['Hausdorff', dev ? `${((100 * dev.hausdorff) / 2).toFixed(3)}%` : 'skipped (large)'],
+      ['Time', `${stats.milliseconds.toFixed(0)} ms`],
+    ];
+    $('stats').innerHTML = rows.map(([k, v]) => `<tr><td>${k}</td><td>${v}</td></tr>`).join('');
+    draw();
+  });
+}
+
+function draw() {
+  const dpr = window.devicePixelRatio || 1;
+  const w = canvas.clientWidth, h = canvas.clientHeight;
+  canvas.width = w * dpr; canvas.height = h * dpr;
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.fillStyle = '#0f1115';
+  ctx.fillRect(0, 0, w, h);
+  if (!current) return;
+  const cy = Math.cos(yaw), sy = Math.sin(yaw), cp = Math.cos(pitch), sp = Math.sin(pitch);
+  const scale = Math.min(w, h) * 0.42 * zoom;
+  const view = current.positions.map(([x, y, z]) => {
+    // Models are z-up; rotate about z (yaw) then tilt about x (pitch).
+    const x1 = cy * x - sy * y, y1 = sy * x + cy * y;
+    const y2 = cp * z - sp * y1, z2 = -(sp * z + cp * y1); // proper rotation, det +1
+    return [x1, y2, z2];
+  });
+  const light = [0.4, 0.6, 0.7];
+  const tris = [];
+  for (const [a, b, c] of current.faces) {
+    const A = view[a], B = view[b], C = view[c];
+    const u = [B[0] - A[0], B[1] - A[1], B[2] - A[2]], v = [C[0] - A[0], C[1] - A[1], C[2] - A[2]];
+    const n = [u[1] * v[2] - u[2] * v[1], u[2] * v[0] - u[0] * v[2], u[0] * v[1] - u[1] * v[0]];
+    const l = Math.hypot(...n) || 1;
+    const facing = -n[2] / l; // camera looks along +z
+    const shade = Math.abs((n[0] * light[0] + n[1] * light[1] - n[2] * light[2]) / l);
+    tris.push({ A, B, C, depth: (A[2] + B[2] + C[2]) / 3, shade, back: facing < 0 });
+  }
+  tris.sort((p, q) => q.depth - p.depth);
+  const wire = $('wire').checked;
+  const px = (P) => [w / 2 + P[0] * scale, h / 2 - P[1] * scale];
+  for (const t of tris) {
+    const [ax, ay] = px(t.A), [bx, by] = px(t.B), [cx, cyy] = px(t.C);
+    const g = Math.round(60 + 170 * t.shade);
+    ctx.fillStyle = t.back ? `rgb(${g * 0.55},${g * 0.4},${g * 0.4})` : `rgb(${g * 0.75},${g * 0.85},${g})`;
+    ctx.beginPath(); ctx.moveTo(ax, ay); ctx.lineTo(bx, by); ctx.lineTo(cx, cyy); ctx.closePath();
+    ctx.fill();
+    ctx.strokeStyle = wire ? 'rgba(10,14,22,0.55)' : ctx.fillStyle;
+    ctx.lineWidth = wire ? 0.6 : 0.4;
+    ctx.stroke();
+  }
+}
+
+let drag = null;
+canvas.addEventListener('pointerdown', (e) => { drag = [e.clientX, e.clientY]; canvas.setPointerCapture(e.pointerId); });
+canvas.addEventListener('pointermove', (e) => {
+  if (!drag) return;
+  yaw += (e.clientX - drag[0]) * 0.01;
+  pitch = Math.max(-1.5, Math.min(1.5, pitch + (e.clientY - drag[1]) * 0.01));
+  drag = [e.clientX, e.clientY];
+  draw();
+});
+canvas.addEventListener('pointerup', () => { drag = null; });
+canvas.addEventListener('wheel', (e) => { e.preventDefault(); zoom *= Math.exp(-e.deltaY * 0.001); draw(); }, { passive: false });
+window.addEventListener('resize', draw);
+
+$('model').addEventListener('change', () => setSource(builtins[$('model').value]()));
+['ratio', 'metric', 'lock'].forEach((id) => $(id).addEventListener('input', run));
+$('wire').addEventListener('input', draw);
+$('file').addEventListener('change', async () => {
+  const f = $('file').files[0];
+  if (!f) return;
+  try { setSource(weld(parseOBJ(await f.text()))); }
+  catch (err) { alert(`Could not read ${f.name}: ${err.message}`); }
+});
+
+setSource(builtins.asteroid());
+</script>
+</body>
+</html>
